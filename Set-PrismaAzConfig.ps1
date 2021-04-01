@@ -69,9 +69,9 @@ function Write-Log {
             Severity = $Severity
             Message = $Message
         }
-        $logfolder = Get-ChildItem "$PSScriptRoot\LOG\"
+        $logfolder = Get-ChildItem "$PSScriptRoot\LOG\" -ErrorAction SilentlyContinue
         if(!$logfolder) {
-            $logfolder = New-Item "$PSScriptRoot\LOG\" -ItemType "Directory"
+            $logfolder = New-Item "$PSScriptRoot\LOG\" -ItemType "Directory" -ErrorAction SilentlyContinue
         } 
     }
     Process {
@@ -90,7 +90,7 @@ function Write-Log {
     }
     End {
         #$logentry | Out-File ($logfolder.FullName+"\Output.csv") -Append
-        Write-Host ($logentry | Out-String) -ForegroundColor $foregroundcolor | Format-Table  -Wrap
+        Write-Host ($logentry | Out-String) -ForegroundColor $foregroundcolor | Format-Table  -AutoSize
     }
 }
 function Set-PrismaAzConfig {
@@ -122,13 +122,13 @@ function Set-PrismaAzConfig {
         try {
             Write-Log -Severity "Information" -Subscription $subid -Message "Start"
             #Retrieve Azure Service Principal credentials from Environment Variables and connect
-            $appid = $Env:AzAppID
-            $pass = ConvertTo-SecureString -String $Env:AzSecret -AsPlainText -Force
+            $appid = $Env:AzProdPrismaSP_USR
+            $pass = ConvertTo-SecureString -String $Env:AzPRodPrismaSP_PSW -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential ($appid, $pass)
-            Connect-AzAccount -ServicePrincipal -Credential $cred -Tenant $Env:AzTenantID| Out-Null 
+            Connect-AzAccount -ServicePrincipal -Credential $cred -Tenant $Env:AzProdTenantID
             try {
                 #Make the Service Principal an Owner of the target subscription, sleep for 90 seconds for permissions to apply
-                New-AzRoleAssignment -ApplicationId $appid -RoleDefinitionName "Owner"  -scope ("/subscriptions/$subid/") -ErrorAction "SilentlyContinue" | Out-Null
+                $RoleAssignment = New-AzRoleAssignment -ApplicationId $appid -RoleDefinitionName "Owner"  -scope ("/subscriptions/$subid/") -ErrorAction "SilentlyContinue" 
                 Write-Log -Severity "Information" -Subscription $subID -Message "Sleeping for 90 seconds to allow Owner permissions to be applied"
                 Clear-AzContext -Scope CurrentUser -Force
                 Start-Sleep 90
@@ -143,7 +143,7 @@ function Set-PrismaAzConfig {
         try {
             
             #Reconnect to Azure so the new permissions are applied to the account
-            Connect-AzAccount -ServicePrincipal -Credential $cred -Tenant $Env:AzTenantID
+            Connect-AzAccount -ServicePrincipal -Credential $cred -Tenant $Env:AzProdTenantID
             $subscription = Set-AzContext $subID -ErrorAction "Stop"
             Write-Log -Severity "Information" -Subscription $subID   -Message "Set Azure context to subscription" 
             $vms = Get-AzVM -ErrorAction "SilentlyContinue"
@@ -207,62 +207,6 @@ function Set-PrismaAzConfig {
             } else {
                 Write-Log -Severity "Information" -Subscription $subID -Message "Network Watcher instance for $location found"
             }
-            $prismansg = Get-AzNetworkSecurityGroup -Name ("nsg-prisma-"+$location)  -ErrorAction "SilentlyContinue"
-            if(!$prismansg){
-                Write-Log -Severity "Warning" -Subscription $subID -Message "Prisma Network Security Group not found for $location"
-                try {
-                    $prismansg = New-AzNetworkSecurityGroup -Name ("nsg-prisma-"+$location) -Location $location -ResourceGroupName "prisma-rg" -ErrorAction "Stop"
-                    Write-Log -Severity "Information" -Subscription $subID -Message "Prisma Network Security Group created for $location"
-                } catch {
-                    Write-Log -Severity "Error" -Subscription $subID -Message ("New-AzNetworkSecurityGroup/Add-AzNetworkSecurityRuleConfig:"+$Error[0] | Out-String)
-                    break
-                }          
-            } else {
-                Write-Log -Severity "Information" -Subscription $subID -Message "Prisma Network Security Group for $location found."
-            }
-            #NSGs are open to allow all traffic via inbound/outbound tcp/udp rules for NSG flow logging
-            try {
-                $tcpinbound = Get-AzNetworkSecurityRuleConfig -Name "prisma-rule-tcp-inbound" -NetworkSecurityGroup $prismansg -ErrorAction "SilentlyContinue"
-                if(!$tcpinbound){
-                    Write-Log -Severity "Warning" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-inbound} in $location not found."
-                    #Use "*" to represent all ports for the specified protocol. 
-                    $prismansg | Add-AzNetworkSecurityRuleConfig -Name "prisma-rule-tcp-inbound" -Access Allow -Protocol TCP -Direction Inbound -Priority 101 `
-                    -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange * | Set-AzNetworkSecurityGroup -ErrorAction "Stop"
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-inbound} in $location configured."
-                } else {
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-inbound} in $location found."
-                }
-                $udpinbound = Get-AzNetworkSecurityRuleConfig -Name "prisma-rule-udp-inbound" -NetworkSecurityGroup $prismansg -ErrorAction "SilentlyContinue"
-                if(!$udpinbound){
-                    Write-Log -Severity "Warning" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-inbound} in $location not found."
-                    $prismansg | Add-AzNetworkSecurityRuleConfig -Name "prisma-rule-udp-inbound" -Access Allow -Protocol UDP -Direction Inbound -Priority 102 `
-                    -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange * | Set-AzNetworkSecurityGroup -ErrorAction "Stop"
-                    Write-Log  -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-inbound} in $location configured."
-                } else {
-                    Write-Log  -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-inbound} in $location found."
-                }
-                $tcpoutbound = Get-AzNetworkSecurityRuleConfig -Name "prisma-rule-tcp-outbound" -NetworkSecurityGroup $prismansg -ErrorAction "SilentlyContinue"
-                if(!$tcpoutbound){
-                    Write-Log -Severity "Warning" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-outbound} in $location not found."
-                    $prismansg | Add-AzNetworkSecurityRuleConfig -Name "prisma-rule-tcp-outbound" -Access Allow -Protocol TCP -Direction Outbound -Priority 101 `
-                    -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange * | Set-AzNetworkSecurityGroup -ErrorAction "Stop"
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-outbound} in $location configured."
-                } else {
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-tcp-outbound} in $location found."
-                }
-                $udpoutbound = Get-AzNetworkSecurityRuleConfig -Name "prisma-rule-udp-outbound" -NetworkSecurityGroup $prismansg -ErrorAction "SilentlyContinue"
-                if(!$udpoutbound){
-                    Write-Log -Severity "Warning" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-outbound} in $location not found."
-                    $prismansg | Add-AzNetworkSecurityRuleConfig -Name "prisma-rule-udp-outbound" -Access Allow -Protocol UDP -Direction Outbound -Priority 102 `
-                    -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange * | Set-AzNetworkSecurityGroup -ErrorAction "Stop"
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-outbound} in $location configured."
-                } else {
-                    Write-Log -Severity "Information" -Subscription $subID -Message "NSG Rule {prisma-rule-udp-outbound} in $location found."
-                }
-            } catch {
-                Write-Log -Severity "Error" -Subscription $subID -Message ("Get/Add-AzNetworkSecurityRuleConfig:"+$Error[0])
-                break
-            }
             #Collect all NSGs in this location, including existing (non-Prisma) NSGs, to enable flow logging for each. 
             $nsgs = Get-AzNetWorkSecurityGroup | Where-Object {$_.Location -eq $location} -ErrorAction "SilentlyContinue"
             ForEach ($nsg in $nsgs){
@@ -298,37 +242,6 @@ function Set-PrismaAzConfig {
                     Write-Log -Severity "Information" -Subscription $subID -Message ("Network Security Group Flow Logs already enabled for " + $nsg.Name | Out-String)
                 }
             }
-            <#----------------------------------------------
-            Identify VMs subnets and attach them to the NSGs 
-            ----------------------------------------------#>
-            #Collect Virtual Machines in this location that are not currently attached to a subnet with an NSG to the Prisma NSG for the location. 
-            $config_vms = $vms | Where-Object {$_.Location -eq $location}
-            ForEach ($vm in $config_vms){
-                $nic = Get-AzNetworkInterface | Where-Object {$_.VirtualMachine.Id -eq $vm.id}
-                #Nic object must be expanded to access the subnet properties 
-                $nic_expanded = Get-AzNetworkInterface -ExpandResource "IpConfigurations/Subnet" -Name $nic.Name  -ResourceGroupName $Vm.ResourceGroupName
-                #Check if the virtual machine NIC subnet is attached to an existing NSG. 
-                if(!$nic_expanded.IpConfigurations.Subnet.NetworkSecurityGroup.Id) {
-                    try {
-                        #Extract the subnet path from the ID by splitting at "virtualnetworks" and taking the second index - for log readability. 
-                        $subnetpath = ($nic_expanded.IpConfigurations.Subnet.Id.Split("virtualNetworks/"))[1]
-                        Write-Log -Severity "Warning" -Subscription $subID -Message ("Adding " + $subnetpath + " to Prisma NSG in " + $location | Out-String)
-                        $vnet = Get-AzVirtualNetwork | Where-Object {$_.Subnets.Id -contains $nic_expanded.IpConfigurations.Subnet.Id} -ErrorAction "Stop"
-                        Set-AzVirtualNetworkSubnetConfig -Name $nic_expanded.IpConfigurations.Subnet.Name  -VirtualNetwork $vnet -AddressPrefix ($vnet.Subnets `
-                        | Where-Object {$_.Id -eq $nic_expanded.IpConfigurations.Subnet.Id}).AddressPrefix `
-                        -NetworkSecurityGroup (Get-AzNetWorkSecurityGroup -Name ("nsg-prisma-"+$location)) -ErrorAction "Stop"
-                        $vnet | Set-AzVirtualNetwork -ErrorAction "Stop"
-                        Write-Log -Severity "Information" -Subscription $subID -Message ("Successfully added " + $subnetpath + " to " +  ("nsg-prisma-"+$location) | Out-String)
-                    } catch {
-                        Write-Log -Severity "Error" -Subscription $subID -Message ("Unable to add " + $subnetpath + " to " +  ("nsg-prisma-"+$location) | Out-String)
-                        break
-                    }                   
-                } else {
-                    Write-Log -Severity "Information" -Subscription $subID -Message ($subnetpath + " is already in " + `
-                    #Extract the name from the existing NSG - for log readability. 
-                    ($nic_expanded.IpConfigurations.Subnet.NetworkSecurityGroup.Id).Split("networkSecurityGroups/")[1] | Out-String) 
-                }
-            }
         }
         <#-----------------------------------------------------------------------------
         Setup Prisma App & Service Principal in Azure and store the required properties
@@ -349,7 +262,7 @@ function Set-PrismaAzConfig {
                 $start = Get-Date
                 $end = $start.AddYears(99)
                 #Using New-key function imported from Sn.NewKey.ps1
-                $key = New-key
+                $key = New-Key A16
                 #Store arguments for New-AzAdApplication in a hash for splatting 
                 $azPrismaAppFuncArgs = @{
                     DisplayName = $azPrismaAppParams["AppName"]
@@ -363,7 +276,7 @@ function Set-PrismaAzConfig {
                 $azPrismaApp = New-AzADApplication @azPrismaAppFuncArgs
                 #Sleep 15 seconds to allow the app to be fully created
                 Start-Sleep -s 15
-                $AzPrismaSP = New-AzADServicePrincipal -ApplicationId $azPrismaApp.ApplicationId -ErrorAction "Stop"
+                $AzPrismaSP = New-AzADServicePrincipal -ApplicationId $azPrismaApp.ApplicationId -Role "Reader" -ErrorAction "Stop" 
                 #Sleep 1 minute to allow the service principal to be created
                 Start-Sleep -s 60
                 #Update the existing dictionary with the properties returned after the app and service principal are created 
@@ -381,21 +294,14 @@ function Set-PrismaAzConfig {
         #Get Azure App Roles applied to newly created Prisma App
         $azPrismaAppRoles = Get-AzRoleAssignment | Where-Object {$_.DisplayName -eq $azPrismaAppParams["AppName"] } | Select-Object RoleDefinitionName -ErrorAction "SilentlyContinue"
         try {
-            #Begin checking and setting the required App Roles for Prisma
-            if($azPrismaAppRoles.RoleDefinitionName -notcontains "Reader"){
-                Write-Log -Severity "Warning" -Subscription $subID -Message ("Reader role not assigned to " + $azPrismaAppParams["AppName"])
-                New-AzRoleAssignment -RoleDefinitionName "Reader" -ApplicationId $azPrismaApp.ApplicationId -ErrorAction "Stop" | Out-Null
-                Write-Log -Severity "Information" -Subscription $subID -Message ("Reader role successfully assigned to " + $azPrismaAppParams["AppName"])
-            } else {
-                Write-Log -Severity "Information" -Subscription $subID -Message ("Reader role already assigned to " + $azPrismaAppParams["AppName"])
-            }
             if($azPrismaAppRoles.RoleDefinitionName -notcontains "Reader and Data Access"){
                 Write-Log -Severity "Warning" -Subscription $subID -Message ("Reader and Data Access role not assigned to " + $azPrismaAppParams["AppName"])
                 New-AzRoleAssignment -RoleDefinitionName "Reader and Data Access" -ApplicationId $azPrismaApp.ApplicationId -ErrorAction "Stop" | Out-Null
                 Write-Log -Severity "Information" -Subscription $subID -Message ("Reader and Data Access role successfully assigned to " + $azPrismaAppParams["AppName"])
             } else {
                 Write-Log -Severity "Information" -Subscription $subID -Message ("Reader and Data Access role already assigned to " + $azPrismaAppParams["AppName"])
-            } 
+            }
+            
             if($azPrismaAppRoles.RoleDefinitionName -notcontains "Network Contributor"){
                 Write-Log -Severity "Warning" -Subscription $subID -Message ("Network Contributor role not assigned to " + $azPrismaAppParams["AppName"])
                 New-AzRoleAssignment -RoleDefinitionName "Network Contributor" -ApplicationId $azPrismaApp.ApplicationId -ErrorAction "Stop" | Out-Null
@@ -417,7 +323,7 @@ function Set-PrismaAzConfig {
         <#-------------------------------------------------------------------------------------------------------------
         Send Azure App and Service Principal information to Prisma Cloud via HTTPS using functions in Prisma.WebAPI.ps1
         -------------------------------------------------------------------------------------------------------------#>
-        $token = Set-PrismaLogin -username $Env:PrismaUsername-pass $Env:PrismaPassword
+        $token = Set-PrismaLogin -username $Env:PrismaCorpAPI_USR -pass $Env:Prisma_CorpAPI_PSW
         $prismaAccountStatus = Get-PrismaCloudAccount -token $token -accountid $subid
         if($prismaAccountStatus.CloudAccount.Enabled -eq $true){
             $addPrismaCloudAccountFuncArgs = @{
@@ -430,7 +336,6 @@ function Set-PrismaAzConfig {
                 tenantid = $azPrismaAppParams["TenantID"] 
                 serviceprincipalid = $azPrismaAppParams["ServicePrincipal"]
             }
-            Write-Host @addPrismaCloudAccountFuncArgs
         } else {
             try {
                 #Retrieve access token from Prisma API
@@ -463,7 +368,6 @@ function Set-PrismaAzConfig {
                                 tenantid = $azPrismaAppParams["TenantID"] 
                                 serviceprincipalid = $azPrismaAppParams["ServicePrincipal"]
                             }
-                            Write-Host @addPrismaCloudAccountFuncArgs
                             Add-PrismaCloudAccount @addPrismaCloudAccountFuncArgs
                             Start-Sleep -s 5
                             $prismaAccountStatus = Get-PrismaCloudAccount -token $token -accountid $subid
@@ -483,11 +387,12 @@ function Set-PrismaAzConfig {
     }
     End {
         Sleep 30
-        Get-AzRoleAssignment -ObjectID $objectid -RoleDefinitionName "Owner" -scope ("/subscriptions/$subid/") | Remove-AzRoleAssignment
+        $RoleAssignment | Remove-AzRoleAssignment | Out-Null
+        #Get-AzRoleAssignment -ObjectID $objectid -RoleDefinitionName "Owner" -scope ("/subscriptions/$subid/") | Remove-AzRoleAssignment
         Write-Log -Severity "Information" -Subscription $subID -Message ("End: " + $subID)
     }
 }
 $Subs = Import-Csv .\accounts.csv
 ForEach ($sub in $subs) {
-    Set-PrismaAzConfig -subid $sub.id -subname $sub.name
+    Set-PrismaAzConfig -subid $sub.id -subname $sub.name -groupId $sub.group
 }
